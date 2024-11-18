@@ -1,0 +1,142 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: Deploys stop/start automation for a Sagemaker Mlflow tracking instance
+
+Parameters:
+
+  SagemakerMlFlowTrackingServerName:
+    Description: Enter the Sagemaker Mlflow tracking server name
+    Type: String
+
+  CronExpressionStartTime:
+    Description: Enter a cron schedule expression, default 07:00 on every weekday (mon-fri)
+    Type: String
+    Default:  "0 7 ? * MON-FRI *" # 07:00 on every weekday
+
+  CronExpressionStopTime:
+    Description: Enter a cron schedule expression, default 19:00 on every weekday (mon-fri)
+    Type: String
+    Default:  "0 19 ? * MON-FRI *" # 19:00 on every weekday (mon-fri)
+
+  CronExpressionTimeZone:
+    Description: Enter a timezone expression, default Europe/Berlin
+    Type: String
+    Default:  "Europe/Berlin"
+
+Resources:
+  
+  EventBridgeSchedulerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - 'scheduler.amazonaws.com'
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      Policies:
+        - PolicyName: EventBridgeSchedulerRolePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: 'lambda:InvokeFunction'
+                Resource: !GetAtt LambdaStartStopSagemakerMlFlowTrackingServerFunction.Arn
+    
+
+  EventBridgeStartSchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: !Sub StartSagemakerMlFlowTrackingServer-${SagemakerMlFlowTrackingServerName}
+      ScheduleExpression: !Sub cron(${CronExpressionStartTime})
+      ScheduleExpressionTimezone: !Ref CronExpressionTimeZone
+      FlexibleTimeWindow:
+        Mode: 'OFF'
+      Target:
+        Arn: !GetAtt LambdaStartStopSagemakerMlFlowTrackingServerFunction.Arn
+        RoleArn: !GetAtt EventBridgeSchedulerRole.Arn
+        Input: '{ "action": "start"}'
+        RetryPolicy:
+          MaximumRetryAttempts: 1
+
+  EventBridgeStopSchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: !Sub StopSagemakerMlFlowTrackingServer-${SagemakerMlFlowTrackingServerName}
+      ScheduleExpression: !Sub cron(${CronExpressionStopTime})
+      ScheduleExpressionTimezone: Europe/Berlin
+      FlexibleTimeWindow:
+        Mode: 'OFF'
+      Target:
+        Arn: !GetAtt LambdaStartStopSagemakerMlFlowTrackingServerFunction.Arn
+        RoleArn: !GetAtt EventBridgeSchedulerRole.Arn
+        Input: '{ "action": "stop"}'
+        RetryPolicy:
+          MaximumRetryAttempts: 1
+      
+
+  LambdaStartStopSagemakerFlowTrackingServerFunctionIAMRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - 'lambda.amazonaws.com'
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      Policies:
+        - PolicyName: LambdaStartStopSagemakerFlowTrackingServerFunctionIAMRolePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'sagemaker:StartMlflowTrackingServer'
+                  - 'sagemaker:StopMlflowTrackingServer'
+                Resource: !Sub 'arn:${AWS::Partition}:sagemaker:${AWS::Region}:${AWS::AccountId}:mlflow-tracking-server/${SagemakerMlFlowTrackingServerName}'
+              - Effect: Allow
+                Action:
+                  - 'lambda:InvokeFunction'
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - 'logs:CreateLogGroup'
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                Resource: 'arn:aws:logs:*:*:*'
+
+  LambdaStartStopSagemakerMlFlowTrackingServerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: StartStopSagemakerMlFlowTrackingServer
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaStartStopSagemakerFlowTrackingServerFunctionIAMRole.Arn
+      Runtime: python3.10
+      Timeout: 500
+      MemorySize: 128
+      Environment:
+        Variables:
+          tracking_server_name: !Ref SagemakerMlFlowTrackingServerName
+      Code:
+        ZipFile: |
+            import json
+            import boto3
+            import os
+            def lambda_handler(event, context):
+              client = boto3.client('sagemaker')
+              action=event['action']
+              tracking_server_name=os.environ['tracking_server_name']
+              if action=='start':
+                response = client.start_mlflow_tracking_server(TrackingServerName=tracking_server_name)
+              elif action=='stop':
+                response = client.stop_mlflow_tracking_server(TrackingServerName=tracking_server_name)
+              return response
+      
